@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>NUCLEO</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overscroll-behavior: none; height: 100%; }
+  #root { height: 100%; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useRef, useEffect, useState, useCallback } = React;
+
+// ---- Supabase (backend reale, sostituisce lo storage degli artifact) ----
+const sb = supabase.createClient(
+  'https://lmgbofmvvjqwnfxuxyyv.supabase.co',
+  'sb_publishable_P_J2DNud9whDwybBkNKwPQ_MJlhoqeT'
+);
+
+async function dbCreateRoom(code, id) {
+  const { error } = await sb.from('matches').insert({
+    code,
+    status: 'waiting',
+    players: { [id]: { baseHP: 100, wave: 1, matchState: 'playing', lastUpdate: Date.now() } },
+  });
+  if (error) throw new Error(error.message);
+}
+
+async function dbJoinRoom(code, id) {
+  const { data, error } = await sb.from('matches').select('*').eq('code', code).single();
+  if (error || !data) throw new Error('Stanza non trovata');
+  const players = data.players || {};
+  if (Object.keys(players).length >= 2) throw new Error('Stanza già piena');
+  players[id] = { baseHP: 100, wave: 1, matchState: 'playing', lastUpdate: Date.now() };
+  const { error: upErr } = await sb.from('matches').update({ players, status: 'playing' }).eq('code', code);
+  if (upErr) throw new Error(upErr.message);
+}
+
+async function dbCountPlayers(code) {
+  const { data, error } = await sb.from('matches').select('players').eq('code', code).single();
+  if (error || !data) return 0;
+  return Object.keys(data.players || {}).length;
+}
+
+async function dbPushAndFetchOpponent(code, id, status) {
+  const { data, error } = await sb.from('matches').select('players').eq('code', code).single();
+  if (error || !data) return null;
+  const players = { ...(data.players || {}) };
+  players[id] = { ...status, lastUpdate: Date.now() };
+  await sb.from('matches').update({ players }).eq('code', code);
+  const oppId = Object.keys(players).find((k) => k !== id);
+  return oppId ? players[oppId] : null;
+}
+
+// ---- CONFIG / DATI (motore di gioco invariato) ----
+const CONFIG = {
+  colors: {
+    bgTop: '#3a1220',
+    bgBottom: '#0d2b3a',
+    divider: 'rgba(255,255,255,0.15)',
+    path: 'rgba(255,255,255,0.14)',
+    projectile: '#ffe66d',
+  },
+  baseHP: 100,
+  pathAFrac: [
+    { fx: 0.15, fy: 0.50 },
+    { fx: 0.75, fy: 0.62 },
+    { fx: 0.25, fy: 0.80 },
+    { fx: 0.5, fy: 0.965 },
+  ],
+  pathBFrac: [
+    { fx: 0.85, fy: 0.50 },
+    { fx: 0.25, fy: 0.60 },
+    { fx: 0.75, fy: 0.78 },
+    { fx: 0.5, fy: 0.965 },
+  ],
+  build: { minDist: 40 },
+  economy: { startEnergy: 60, passiveIncome: 1, incomeInterval: 2500, killReward: 2 },
+  surge: { maxMeter: 100, meterPerDamage: 0.6, boostDuration: 6000, damageMultiplier: 1.6, cooldownMultiplier: 0.6, coreTapRadius: 36 },
+};
+
+const TOWER_TYPES = {
+  rapida: { name: 'Rapida', cost: 20, range: 90, damage: 6, cooldown: 420, radius: 11, projectileSpeed: 320, color: '#4de3ff', rangeColor: 'rgba(77,227,255,0.10)' },
+  pesante: { name: 'Pesante', cost: 38, range: 105, damage: 20, cooldown: 1100, radius: 14, projectileSpeed: 260, color: '#a78bfa', rangeColor: 'rgba(167,139,250,0.10)' },
+};
+
+const ENEMY_TYPES = {
+  grunt: { hp: 30, speed: 55, radius: 10, damageToBase: 10, color: '#ff5d5d', armor: 0 },
+  scout: { hp: 14, speed: 95, radius: 7, damageToBase: 6, color: '#ffb84d', armor: 0 },
+  corazzato: { hp: 55, speed: 40, radius: 12, damageToBase: 14, color: '#8b93a8', armor: 4 },
+  boss: { hp: 260, speed: 32, radius: 18, damageToBase: 30, color: '#ff2d55', armor: 2 },
+};
+
+const WAVES = [
+  { enemies: [{ type: 'grunt', count: 5, interval: 900, path: 'A' }] },
+  { enemies: [{ type: 'grunt', count: 5, interval: 800, path: 'A' }, { type: 'scout', count: 4, interval: 500, path: 'B' }] },
+  { enemies: [{ type: 'scout', count: 5, interval: 400, path: 'A' }, { type: 'grunt', count: 5, interval: 500, path: 'B' }, { type: 'scout', count: 3, interval: 400, path: 'A' }] },
+  { enemies: [{ type: 'corazzato', count: 3, interval: 1200, path: 'A' }, { type: 'corazzato', count: 3, interval: 1200, path: 'B' }, { type: 'scout', count: 4, interval: 450, path: 'B' }] },
+  { enemies: [{ type: 'grunt', count: 5, interval: 600, path: 'A' }, { type: 'corazzato', count: 2, interval: 1000, path: 'B' }, { type: 'corazzato', count: 2, interval: 1000, path: 'A' }, { type: 'boss', count: 1, interval: 0, path: 'B' }] },
+];
+
+const INITIAL_WAVE_STATE = { waveIndex: 0, groupIndex: 0, spawnedInGroup: 0, spawnTimer: 0, phase: 'intermission', intermissionLeft: 2000 };
+const INITIAL_WAVE_UI = { wave: 1, phase: 'intermission', countdown: 2 };
+
+function generateId() { return Math.random().toString(36).slice(2, 10); }
+function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+function compareResults(mine, theirs) {
+  const tier = (r) => (r.matchState === 'won' ? 2 : 1);
+  const myTier = tier(mine), theirTier = tier(theirs);
+  if (myTier !== theirTier) return myTier > theirTier ? 'win' : 'lose';
+  const myScore = mine.matchState === 'won' ? mine.baseHP : mine.wave;
+  const theirScore = theirs.matchState === 'won' ? theirs.baseHP : theirs.wave;
+  if (myScore === theirScore) return 'draw';
+  return myScore > theirScore ? 'win' : 'lose';
+}
+
+function NucleoMultiplayer() {
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+
+  const pathPxRef = useRef({ A: [], B: [] });
+  const towersRef = useRef([]);
+  const enemiesRef = useRef([]);
+  const projectilesRef = useRef([]);
+  const nextIdRef = useRef(1);
+  const waveStateRef = useRef({ ...INITIAL_WAVE_STATE });
+  const waveUIRef = useRef({ ...INITIAL_WAVE_UI });
+  const matchStateRef = useRef('playing');
+  const economyTimerRef = useRef(CONFIG.economy.incomeInterval);
+  const surgeMeterRef = useRef(0);
+  const surgeActiveUntilRef = useRef(0);
+  const surgeActiveRef = useRef(false);
+  const baseHPRef = useRef(CONFIG.baseHP);
+  const myIdRef = useRef(null);
+
+  const [dims, setDims] = useState({ w: 360, h: 600 });
+  const [baseHP, setBaseHP] = useState(CONFIG.baseHP);
+  const [defeated, setDefeated] = useState(0);
+  const [energy, setEnergy] = useState(CONFIG.economy.startEnergy);
+  const [selectedType, setSelectedType] = useState('rapida');
+  const [matchState, setMatchState] = useState('playing');
+  const [waveUI, setWaveUI] = useState({ ...INITIAL_WAVE_UI });
+  const [surgeMeter, setSurgeMeter] = useState(0);
+  const [surgeActive, setSurgeActive] = useState(false);
+  const [resetTick, setResetTick] = useState(0);
+
+  const [screen, setScreen] = useState('lobby');
+  const [roomCode, setRoomCode] = useState('');
+  const [joinInput, setJoinInput] = useState('');
+  const [lobbyError, setLobbyError] = useState('');
+  const [lobbyBusy, setLobbyBusy] = useState(false);
+  const [opponent, setOpponent] = useState(null);
+  const [finalResult, setFinalResult] = useState(null);
+
+  useEffect(() => {
+    function updateSize() {
+      const el = containerRef.current;
+      if (!el) return;
+      setDims({ w: el.clientWidth, h: el.clientHeight });
+    }
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, [screen]);
+
+  useEffect(() => {
+    pathPxRef.current = {
+      A: CONFIG.pathAFrac.map((p) => ({ x: p.fx * dims.w, y: p.fy * dims.h })),
+      B: CONFIG.pathBFrac.map((p) => ({ x: p.fx * dims.w, y: p.fy * dims.h })),
+    };
+  }, [dims]);
+
+  useEffect(() => { baseHPRef.current = baseHP; }, [baseHP]);
+
+  useEffect(() => {
+    if (baseHP <= 0 && matchStateRef.current === 'playing') {
+      matchStateRef.current = 'lost';
+      setMatchState('lost');
+    }
+  }, [baseHP]);
+
+  const resetGame = useCallback(() => {
+    towersRef.current = [];
+    enemiesRef.current = [];
+    projectilesRef.current = [];
+    waveStateRef.current = { ...INITIAL_WAVE_STATE };
+    waveUIRef.current = { ...INITIAL_WAVE_UI };
+    matchStateRef.current = 'playing';
+    economyTimerRef.current = CONFIG.economy.incomeInterval;
+    surgeMeterRef.current = 0;
+    surgeActiveUntilRef.current = 0;
+    surgeActiveRef.current = false;
+    setBaseHP(CONFIG.baseHP);
+    setDefeated(0);
+    setEnergy(CONFIG.economy.startEnergy);
+    setSelectedType('rapida');
+    setMatchState('playing');
+    setWaveUI({ ...INITIAL_WAVE_UI });
+    setSurgeMeter(0);
+    setSurgeActive(false);
+  }, []);
+
+  useEffect(() => { resetGame(); }, [resetTick, resetGame]);
+
+  // sala d'attesa: aspetta il secondo giocatore
+  useEffect(() => {
+    if (screen !== 'waiting') return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const count = await dbCountPlayers(roomCode);
+        if (!cancelled && count >= 2) setScreen('game');
+      } catch (err) { /* riprova al prossimo tick */ }
+    }, 1500);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [screen, roomCode]);
+
+  // partita in corso: invia il mio stato, leggi quello dell'avversario
+  useEffect(() => {
+    if (screen !== 'game' || !roomCode) return;
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const opp = await dbPushAndFetchOpponent(roomCode, myIdRef.current, {
+          baseHP: Math.max(0, baseHPRef.current),
+          wave: waveUIRef.current.wave,
+          matchState: matchStateRef.current,
+        });
+        if (!cancelled && opp) setOpponent(opp);
+      } catch (err) { /* riprova al prossimo tick */ }
+    }, 1500);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [screen, roomCode]);
+
+  // appena la mia partita finisce, notifica subito
+  useEffect(() => {
+    if (screen !== 'game' || matchState === 'playing' || !roomCode) return;
+    (async () => {
+      try {
+        await dbPushAndFetchOpponent(roomCode, myIdRef.current, {
+          baseHP: Math.max(0, baseHPRef.current),
+          wave: waveUIRef.current.wave,
+          matchState,
+        });
+      } catch (err) { /* il polling regolare riproverà */ }
+    })();
+  }, [matchState, screen, roomCode]);
+
+  useEffect(() => {
+    if (finalResult) return;
+    if (matchState === 'playing') return;
+    if (!opponent || opponent.matchState === 'playing') return;
+    const mine = { matchState, baseHP: baseHPRef.current, wave: waveUIRef.current.wave };
+    const theirs = { matchState: opponent.matchState, baseHP: opponent.baseHP, wave: opponent.wave };
+    setFinalResult(compareResults(mine, theirs));
+  }, [matchState, opponent, finalResult]);
+
+  // ---- game loop ----
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || dims.w === 0 || dims.h === 0) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = dims.w * dpr;
+    canvas.height = dims.h * dpr;
+    canvas.style.width = dims.w + 'px';
+    canvas.style.height = dims.h + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    let raf;
+    let last = performance.now();
+
+    function pointAt(pathId, segIndex, segT) {
+      const path = pathPxRef.current[pathId];
+      if (!path || path.length === 0) return { x: 0, y: 0 };
+      if (segIndex >= path.length - 1) return path[path.length - 1];
+      const a = path[segIndex], b = path[segIndex + 1];
+      return { x: a.x + (b.x - a.x) * segT, y: a.y + (b.y - a.y) * segT };
+    }
+
+    function updateWaves(dtSec) {
+      const ws = waveStateRef.current;
+      if (ws.phase === 'won') return;
+      if (ws.phase === 'intermission') {
+        ws.intermissionLeft -= dtSec * 1000;
+        if (ws.intermissionLeft <= 0) { ws.phase = 'spawning'; ws.groupIndex = 0; ws.spawnedInGroup = 0; ws.spawnTimer = 0; }
+        return;
+      }
+      if (ws.phase === 'spawning') {
+        const wave = WAVES[ws.waveIndex];
+        const group = wave.enemies[ws.groupIndex];
+        ws.spawnTimer -= dtSec * 1000;
+        if (ws.spawnTimer <= 0) {
+          const typeConf = ENEMY_TYPES[group.type];
+          enemiesRef.current.push({ id: nextIdRef.current++, type: group.type, path: group.path, segIndex: 0, segT: 0, hp: typeConf.hp });
+          ws.spawnedInGroup += 1;
+          ws.spawnTimer = group.interval;
+          if (ws.spawnedInGroup >= group.count) {
+            ws.groupIndex += 1; ws.spawnedInGroup = 0;
+            if (ws.groupIndex >= wave.enemies.length) ws.phase = 'holding';
+          }
+        }
+        return;
+      }
+      if (ws.phase === 'holding') {
+        if (enemiesRef.current.length === 0) {
+          ws.waveIndex += 1;
+          if (ws.waveIndex >= WAVES.length) { ws.phase = 'won'; matchStateRef.current = 'won'; setMatchState('won'); }
+          else { ws.phase = 'intermission'; ws.intermissionLeft = 3000; }
+        }
+      }
+    }
+
+    function syncWaveUI() {
+      const ws = waveStateRef.current;
+      const countdown = ws.phase === 'intermission' ? Math.ceil(Math.max(0, ws.intermissionLeft) / 1000) : 0;
+      const next = { wave: Math.min(ws.waveIndex + 1, WAVES.length), phase: ws.phase, countdown };
+      const prev = waveUIRef.current;
+      if (prev.wave !== next.wave || prev.phase !== next.phase || prev.countdown !== next.countdown) {
+        waveUIRef.current = next;
+        setWaveUI(next);
+      }
+    }
+
+    function step(dtSec, now) {
+      const paths = pathPxRef.current;
+      if (!paths.A || paths.A.length < 2 || !paths.B || paths.B.length < 2) return;
+
+      updateWaves(dtSec);
+
+      economyTimerRef.current -= dtSec * 1000;
+      if (economyTimerRef.current <= 0) {
+        economyTimerRef.current = CONFIG.economy.incomeInterval;
+        setEnergy((en) => en + CONFIG.economy.passiveIncome);
+      }
+
+      const surgeOn = now < surgeActiveUntilRef.current;
+      if (surgeOn !== surgeActiveRef.current) { surgeActiveRef.current = surgeOn; setSurgeActive(surgeOn); }
+
+      enemiesRef.current.forEach((e) => {
+        const path = paths[e.path];
+        const speed = ENEMY_TYPES[e.type].speed;
+        let remaining = speed * dtSec;
+        while (remaining > 0 && e.segIndex < path.length - 1) {
+          const a = path[e.segIndex], b = path[e.segIndex + 1];
+          const segLen = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+          const remInSeg = segLen * (1 - e.segT);
+          if (remaining < remInSeg) { e.segT += remaining / segLen; remaining = 0; }
+          else { remaining -= remInSeg; e.segIndex += 1; e.segT = 0; }
+        }
+      });
+
+      let baseDamage = 0;
+      enemiesRef.current = enemiesRef.current.filter((e) => {
+        const path = paths[e.path];
+        if (e.segIndex >= path.length - 1) { baseDamage += ENEMY_TYPES[e.type].damageToBase; return false; }
+        return true;
+      });
+      if (baseDamage > 0) setBaseHP((hp) => Math.max(0, hp - baseDamage));
+
+      towersRef.current.forEach((t) => {
+        const typeConf = TOWER_TYPES[t.type];
+        t.cooldownLeft = Math.max(0, t.cooldownLeft - dtSec * 1000);
+        if (t.cooldownLeft === 0) {
+          let target = null, bestDist = Infinity;
+          enemiesRef.current.forEach((e) => {
+            const p = pointAt(e.path, e.segIndex, e.segT);
+            const d = Math.hypot(p.x - t.x, p.y - t.y);
+            if (d <= typeConf.range && d < bestDist) { bestDist = d; target = e; }
+          });
+          if (target) {
+            t.cooldownLeft = surgeOn ? typeConf.cooldown * CONFIG.surge.cooldownMultiplier : typeConf.cooldown;
+            const dmg = surgeOn ? typeConf.damage * CONFIG.surge.damageMultiplier : typeConf.damage;
+            projectilesRef.current.push({ x: t.x, y: t.y, targetId: target.id, damage: dmg, speed: typeConf.projectileSpeed });
+          }
+        }
+      });
+
+      let meterGain = 0;
+      projectilesRef.current = projectilesRef.current.filter((p) => {
+        const target = enemiesRef.current.find((e) => e.id === p.targetId);
+        if (!target) return false;
+        const tp = pointAt(target.path, target.segIndex, target.segT);
+        const dx = tp.x - p.x, dy = tp.y - p.y;
+        const d = Math.hypot(dx, dy);
+        const moveDist = p.speed * dtSec;
+        if (d <= moveDist) {
+          const armor = ENEMY_TYPES[target.type].armor || 0;
+          const dmgDealt = Math.max(1, p.damage - armor);
+          target.hp -= dmgDealt;
+          meterGain += dmgDealt * CONFIG.surge.meterPerDamage;
+          return false;
+        }
+        p.x += (dx / d) * moveDist; p.y += (dy / d) * moveDist;
+        return true;
+      });
+      if (meterGain > 0) {
+        surgeMeterRef.current = Math.min(CONFIG.surge.maxMeter, surgeMeterRef.current + meterGain);
+        setSurgeMeter(surgeMeterRef.current);
+      }
+
+      const before = enemiesRef.current.length;
+      enemiesRef.current = enemiesRef.current.filter((e) => e.hp > 0);
+      const killed = before - enemiesRef.current.length;
+      if (killed > 0) { setDefeated((d) => d + killed); setEnergy((en) => en + killed * CONFIG.economy.killReward); }
+
+      syncWaveUI();
+    }
+
+    function draw(now) {
+      const { w, h } = dims;
+      const paths = pathPxRef.current;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = CONFIG.colors.bgTop; ctx.fillRect(0, 0, w, h / 2);
+      ctx.fillStyle = CONFIG.colors.bgBottom; ctx.fillRect(0, h / 2, w, h / 2);
+      ctx.strokeStyle = CONFIG.colors.divider; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+
+      ['A', 'B'].forEach((pid) => {
+        const path = paths[pid];
+        if (path && path.length > 1) {
+          ctx.strokeStyle = CONFIG.colors.path; ctx.lineWidth = 16; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+          ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
+          for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+          ctx.stroke();
+        }
+      });
+
+      const coreX = w / 2, coreY = h / 2;
+      const meterPct = surgeMeterRef.current / CONFIG.surge.maxMeter;
+      const ready = meterPct >= 1;
+      const surgeOn = now < surgeActiveUntilRef.current;
+      const baseRadius = 14 + meterPct * 10;
+      const pulse = ready ? Math.sin(now / 200) * 3 : 0;
+      const radius = baseRadius + pulse;
+      const coreColor = surgeOn || ready ? '#ffe66d' : '#4de3ff';
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(coreX, coreY, 22, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = coreColor; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(coreX, coreY, 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * meterPct); ctx.stroke();
+
+      const coreGrad = ctx.createRadialGradient(coreX, coreY, 0, coreX, coreY, radius * 2.4);
+      coreGrad.addColorStop(0, surgeOn ? 'rgba(255,230,109,0.5)' : ready ? 'rgba(255,230,109,0.35)' : 'rgba(77,227,255,0.28)');
+      coreGrad.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = coreGrad; ctx.beginPath(); ctx.arc(coreX, coreY, radius * 2.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = coreColor; ctx.beginPath(); ctx.arc(coreX, coreY, radius, 0, Math.PI * 2); ctx.fill();
+
+      towersRef.current.forEach((t) => {
+        const typeConf = TOWER_TYPES[t.type];
+        ctx.fillStyle = typeConf.rangeColor; ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.range, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = typeConf.color; ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.radius, 0, Math.PI * 2); ctx.fill();
+      });
+
+      enemiesRef.current.forEach((e) => {
+        const typeConf = ENEMY_TYPES[e.type];
+        const p = pointAt(e.path, e.segIndex, e.segT);
+        ctx.fillStyle = typeConf.color; ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius, 0, Math.PI * 2); ctx.fill();
+        if (typeConf.armor) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius + 3, 0, Math.PI * 2); ctx.stroke();
+        }
+        const barW = e.type === 'boss' ? 40 : 24;
+        const pct = Math.max(0, e.hp / typeConf.hp);
+        ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 9, barW, 4);
+        ctx.fillStyle = '#ff8a8a'; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 9, barW * pct, 4);
+      });
+
+      ctx.fillStyle = CONFIG.colors.projectile;
+      projectilesRef.current.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2); ctx.fill(); });
+    }
+
+    function loop(now) {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      if (matchStateRef.current === 'playing') step(dt, now);
+      draw(now);
+      raf = requestAnimationFrame(loop);
+    }
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [dims, resetTick, screen]);
+
+  function activateSurge() {
+    if (surgeMeter < CONFIG.surge.maxMeter) return;
+    surgeMeterRef.current = 0;
+    surgeActiveUntilRef.current = performance.now() + CONFIG.surge.boostDuration;
+    setSurgeMeter(0);
+  }
+
+  function handlePlace(e) {
+    if (matchState !== 'playing') return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const coreX = dims.w / 2, coreY = dims.h / 2;
+    if (Math.hypot(x - coreX, y - coreY) < CONFIG.surge.coreTapRadius) { activateSurge(); return; }
+    if (y < dims.h / 2 + 20) return;
+    const typeConf = TOWER_TYPES[selectedType];
+    if (energy < typeConf.cost) return;
+    const tooClose = towersRef.current.some((t) => Math.hypot(t.x - x, t.y - y) < CONFIG.build.minDist);
+    if (tooClose) return;
+    towersRef.current.push({ x, y, type: selectedType, cooldownLeft: 0 });
+    setEnergy((en) => en - typeConf.cost);
+  }
+
+  async function handleCreateRoom() {
+    setLobbyError(''); setLobbyBusy(true);
+    const code = generateRoomCode();
+    const id = generateId();
+    myIdRef.current = id;
+    try {
+      await dbCreateRoom(code, id);
+      setRoomCode(code);
+      setScreen('waiting');
+    } catch (err) {
+      setLobbyError('Errore: ' + (err && err.message ? err.message : String(err)));
+    } finally {
+      setLobbyBusy(false);
+    }
+  }
+
+  async function handleJoinRoom() {
+    setLobbyError(''); setLobbyBusy(true);
+    const code = joinInput.trim().toUpperCase();
+    if (code.length !== 4) { setLobbyError('Inserisci il codice a 4 caratteri.'); setLobbyBusy(false); return; }
+    const id = generateId();
+    myIdRef.current = id;
+    try {
+      await dbJoinRoom(code, id);
+      setRoomCode(code);
+      setScreen('game');
+    } catch (err) {
+      setLobbyError(err && err.message ? err.message : 'Errore di rete.');
+    } finally {
+      setLobbyBusy(false);
+    }
+  }
+
+  function handleCancelWaiting() { setScreen('lobby'); setRoomCode(''); }
+  function handleNewMatch() {
+    setScreen('lobby'); setRoomCode(''); setJoinInput(''); setOpponent(null); setFinalResult(null);
+    setResetTick((t) => t + 1);
+  }
+
+  if (screen === 'lobby') {
+    return (
+      <div className="w-full h-screen bg-black flex flex-col items-center justify-center gap-4 px-6 text-white">
+        <div className="text-cyan-300 text-xl font-semibold tracking-widest">NUCLEO</div>
+        <div className="text-white/40 text-xs">1v1 · difendi il tuo nucleo</div>
+        <button onClick={handleCreateRoom} disabled={lobbyBusy} className="w-full max-w-xs py-3 rounded-lg bg-cyan-400 text-black font-medium disabled:opacity-50">
+          Crea partita
+        </button>
+        <div className="w-full max-w-xs flex items-center gap-2">
+          <div className="flex-1 h-px bg-white/10" /><span className="text-white/30 text-xs">oppure</span><div className="flex-1 h-px bg-white/10" />
+        </div>
+        <div className="w-full max-w-xs flex gap-2">
+          <input value={joinInput} onChange={(ev) => setJoinInput(ev.target.value.toUpperCase())} placeholder="CODICE" maxLength={4}
+            className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-center tracking-widest text-white placeholder-white/30" />
+          <button onClick={handleJoinRoom} disabled={lobbyBusy} className="px-4 py-2 rounded-lg bg-white/10 text-white text-sm font-medium disabled:opacity-50">Entra</button>
+        </div>
+        {lobbyError && <div className="text-red-300 text-xs text-center max-w-xs">{lobbyError}</div>}
+      </div>
+    );
+  }
+
+  if (screen === 'waiting') {
+    return (
+      <div className="w-full h-screen bg-black flex flex-col items-center justify-center gap-4 px-6 text-white">
+        <div className="text-cyan-300 text-sm">In attesa dell'avversario…</div>
+        <div className="text-5xl font-bold tracking-[0.3em] text-yellow-300">{roomCode}</div>
+        <div className="text-white/40 text-xs text-center max-w-xs">Condividi questo codice con chi vuoi sfidare.</div>
+        <button onClick={handleCancelWaiting} className="mt-2 text-white/40 text-xs underline">Annulla</button>
+      </div>
+    );
+  }
+
+  const waveLabel = waveUI.phase === 'intermission'
+    ? `Ondata ${waveUI.wave}/${WAVES.length} · costruisci (${waveUI.countdown}s)`
+    : `Ondata ${waveUI.wave}/${WAVES.length}`;
+  const opponentHP = opponent ? Math.max(0, opponent.baseHP) : CONFIG.baseHP;
+  const waitingForOpponent = matchState !== 'playing' && !finalResult;
+
+  return (
+    <div className="w-full h-screen bg-black flex flex-col select-none">
+      <div className="px-3 pt-3 pb-1">
+        <div className="flex justify-between text-xs text-red-300 mb-1">
+          <span>AVVERSARIO {opponent ? `· onda ${opponent.wave}` : '· sincronizzazione…'}</span>
+          <span>{opponentHP} / {CONFIG.baseHP}</span>
+        </div>
+        <div className="h-2 bg-red-950 rounded-full overflow-hidden">
+          <div className="h-full bg-red-400 rounded-full" style={{ width: `${opponentHP}%` }} />
+        </div>
+      </div>
+
+      <div ref={containerRef} className={'relative flex-1 mx-2 rounded-xl overflow-hidden border ' + (surgeActive ? 'border-yellow-300/60' : 'border-white/10')}>
+        <canvas ref={canvasRef} onPointerDown={handlePlace} className="absolute inset-0 touch-none" />
+        <div className="absolute inset-x-0 top-2 text-center pointer-events-none">
+          <div className="text-white/40 text-xs tracking-widest uppercase">{waveLabel}</div>
+          {surgeMeter >= CONFIG.surge.maxMeter && matchState === 'playing' && (
+            <div className="text-yellow-300 text-xs font-medium mt-0.5 animate-pulse">⚡ SURGE PRONTO · TOCCA IL NUCLEO</div>
+          )}
+        </div>
+
+        {waitingForOpponent && (
+          <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 px-6 text-center">
+            <div className={matchState === 'won' ? 'text-cyan-300 text-sm tracking-wide' : 'text-red-300 text-sm tracking-wide'}>
+              {matchState === 'won' ? 'DIFESA COMPLETATA' : 'BASE COMPROMESSA'}
+            </div>
+            <div className="text-white/50 text-xs">
+              In attesa che l'avversario finisca{opponent ? ` (onda ${opponent.wave}, ${opponentHP} HP)` : '…'}
+            </div>
+          </div>
+        )}
+
+        {finalResult && (
+          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-3 px-6 text-center">
+            <div className={finalResult === 'win' ? 'text-cyan-300 text-lg font-semibold tracking-wide' : finalResult === 'lose' ? 'text-red-300 text-lg font-semibold tracking-wide' : 'text-yellow-300 text-lg font-semibold tracking-wide'}>
+              {finalResult === 'win' ? 'HAI VINTO LA PARTITA' : finalResult === 'lose' ? 'HAI PERSO LA PARTITA' : 'PAREGGIO'}
+            </div>
+            <button onClick={handleNewMatch} className="px-4 py-2 rounded-full bg-cyan-400 text-black text-sm font-medium">Nuova partita</button>
+          </div>
+        )}
+      </div>
+
+      <div className="px-3 pb-3 pt-1">
+        <div className="h-2 bg-cyan-950 rounded-full overflow-hidden mb-1">
+          <div className="h-full bg-cyan-400 rounded-full" style={{ width: `${Math.max(0, baseHP)}%` }} />
+        </div>
+        <div className="flex justify-between text-xs text-cyan-300 mb-2">
+          <span>{Math.max(0, baseHP)} / {CONFIG.baseHP}</span>
+          <span>⚡ {energy} · sconfitti {defeated}</span>
+        </div>
+        <div className="h-1.5 bg-yellow-950 rounded-full overflow-hidden mb-2">
+          <div className="h-full bg-yellow-300 rounded-full" style={{ width: `${surgeMeter}%` }} />
+        </div>
+        <div className="flex gap-2">
+          {Object.entries(TOWER_TYPES).map(([key, t]) => (
+            <button key={key} onClick={() => setSelectedType(key)}
+              className={'flex-1 py-2 rounded-lg text-xs font-medium border transition-colors ' + (selectedType === key ? 'bg-cyan-400 text-black border-cyan-400' : 'bg-white/5 text-white/70 border-white/10')}>
+              {t.name} · ⚡{t.cost}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<NucleoMultiplayer />);
+</script>
+</body>
+</html>
