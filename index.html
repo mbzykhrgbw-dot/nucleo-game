@@ -16,14 +16,37 @@
 </head>
 <body>
 <div id="root"></div>
+<script>
+  // Rete di sicurezza: qualsiasi errore JS non gestito viene mostrato direttamente
+  // nella pagina, invece di lasciare uno schermo nero senza spiegazione.
+  function showFatalError(msg) {
+    var root = document.getElementById('root');
+    if (root && root.dataset.rendered !== 'true') {
+      root.innerHTML =
+        '<div style="color:#ff9d9d;background:#1a0000;padding:16px;' +
+        'font-family:monospace;font-size:13px;white-space:pre-wrap;' +
+        'min-height:100vh;box-sizing:border-box;">ERRORE JAVASCRIPT:\n\n' +
+        msg + '</div>';
+    }
+  }
+  window.addEventListener('error', function (e) {
+    showFatalError((e.message || 'errore sconosciuto') + '\n(riga ' + e.lineno + ', colonna ' + e.colno + ')');
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var reason = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+    showFatalError('Promise non gestita: ' + reason);
+  });
+</script>
 <script type="text/babel" data-presets="react">
 
 const { useRef, useEffect, useState, useCallback } = React;
 
 // ---- Supabase (backend reale, sostituisce lo storage degli artifact) ----
+// Uso la chiave anon legacy (JWT) invece della nuova "publishable": è il formato
+// storicamente supportato da tutte le versioni di supabase-js caricate da CDN.
 const sb = supabase.createClient(
   'https://lmgbofmvvjqwnfxuxyyv.supabase.co',
-  'sb_publishable_P_J2DNud9whDwybBkNKwPQ_MJlhoqeT'
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxtZ2JvZm12dmpxd25meHV4eXl2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2OTEwNzEsImV4cCI6MjEwMzI2NzA3MX0.8u_cbnzzlND_jAgrApe6ee8PYFOMK-AgFCFWhl9bjIA'
 );
 
 async function dbCreateRoom(code, id) {
@@ -663,6 +686,7 @@ function NucleoMultiplayer() {
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<NucleoMultiplayer />);
+document.getElementById('root').dataset.rendered = 'true';
 </script>
 </body>
 </html>
