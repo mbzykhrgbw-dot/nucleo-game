@@ -8,7 +8,10 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<script type="module">
+  import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+  window.__supabaseCreateClient = createClient;
+</script>
 <style>
   html, body { margin: 0; padding: 0; background: #000; overscroll-behavior: none; height: 100%; }
   #root { height: 100%; }
@@ -42,15 +45,24 @@
 const { useRef, useEffect, useState, useCallback } = React;
 
 // ---- Supabase (backend reale, sostituisce lo storage degli artifact) ----
-// Uso la chiave anon legacy (JWT) invece della nuova "publishable": è il formato
-// storicamente supportato da tutte le versioni di supabase-js caricate da CDN.
-const sb = supabase.createClient(
-  'https://lmgbofmvvjqwnfxuxyyv.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxtZ2JvZm12dmpxd25meHV4eXl2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2OTEwNzEsImV4cCI6MjEwMzI2NzA3MX0.8u_cbnzzlND_jAgrApe6ee8PYFOMK-AgFCFWhl9bjIA'
-);
+// Creazione "pigra": il modulo ES che espone createClient viene caricato in parallelo,
+// quindi la prima chiamata effettiva (sempre dopo un tocco dell'utente) lo troverà pronto.
+let _sb = null;
+function getSb() {
+  if (!_sb) {
+    if (!window.__supabaseCreateClient) {
+      throw new Error('Libreria Supabase non ancora pronta, riprova tra un istante.');
+    }
+    _sb = window.__supabaseCreateClient(
+      'https://lmgbofmvvjqwnfxuxyyv.supabase.co',
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxtZ2JvZm12dmpxd25meHV4eXl2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2OTEwNzEsImV4cCI6MjEwMzI2NzA3MX0.8u_cbnzzlND_jAgrApe6ee8PYFOMK-AgFCFWhl9bjIA'
+    );
+  }
+  return _sb;
+}
 
 async function dbCreateRoom(code, id) {
-  const { error } = await sb.from('matches').insert({
+  const { error } = await getSb().from('matches').insert({
     code,
     status: 'waiting',
     players: { [id]: { baseHP: 100, wave: 1, matchState: 'playing', lastUpdate: Date.now() } },
@@ -59,27 +71,27 @@ async function dbCreateRoom(code, id) {
 }
 
 async function dbJoinRoom(code, id) {
-  const { data, error } = await sb.from('matches').select('*').eq('code', code).single();
+  const { data, error } = await getSb().from('matches').select('*').eq('code', code).single();
   if (error || !data) throw new Error('Stanza non trovata');
   const players = data.players || {};
   if (Object.keys(players).length >= 2) throw new Error('Stanza già piena');
   players[id] = { baseHP: 100, wave: 1, matchState: 'playing', lastUpdate: Date.now() };
-  const { error: upErr } = await sb.from('matches').update({ players, status: 'playing' }).eq('code', code);
+  const { error: upErr } = await getSb().from('matches').update({ players, status: 'playing' }).eq('code', code);
   if (upErr) throw new Error(upErr.message);
 }
 
 async function dbCountPlayers(code) {
-  const { data, error } = await sb.from('matches').select('players').eq('code', code).single();
+  const { data, error } = await getSb().from('matches').select('players').eq('code', code).single();
   if (error || !data) return 0;
   return Object.keys(data.players || {}).length;
 }
 
 async function dbPushAndFetchOpponent(code, id, status) {
-  const { data, error } = await sb.from('matches').select('players').eq('code', code).single();
+  const { data, error } = await getSb().from('matches').select('players').eq('code', code).single();
   if (error || !data) return null;
   const players = { ...(data.players || {}) };
   players[id] = { ...status, lastUpdate: Date.now() };
-  await sb.from('matches').update({ players }).eq('code', code);
+  await getSb().from('matches').update({ players }).eq('code', code);
   const oppId = Object.keys(players).find((k) => k !== id);
   return oppId ? players[oppId] : null;
 }
