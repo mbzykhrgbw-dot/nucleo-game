@@ -4,10 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>NUCLEO</title>
-<script src="https://cdn.tailwindcss.com" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   window.__supabaseCreateClient = createClient;
@@ -44,7 +44,7 @@
     showFatalError('Promise non gestita: ' + reason);
   });
 </script>
-<script type="text/babel" data-presets="react">
+<script type="text/babel-source" id="app-source">
 
 const { useRef, useEffect, useState, useCallback } = React;
 
@@ -703,6 +703,24 @@ function NucleoMultiplayer() {
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<NucleoMultiplayer />);
 document.getElementById('root').dataset.rendered = 'true';
+</script>
+<script>
+  // Compilo il JSX io stesso, forzando il runtime "classic" (React.createElement),
+  // che non richiede import di alcun tipo — a differenza del runtime "automatic"
+  // che Babel userebbe di default e che qui non può essere risolto.
+  (function () {
+    try {
+      var src = document.getElementById('app-source').textContent;
+      var out = Babel.transform(src, {
+        presets: [['react', { runtime: 'classic' }]],
+      }).code;
+      var s = document.createElement('script');
+      s.textContent = out;
+      document.body.appendChild(s);
+    } catch (err) {
+      showFatalError('Errore di compilazione Babel: ' + (err && err.message ? err.message : String(err)));
+    }
+  })();
 </script>
 </body>
 </html>
