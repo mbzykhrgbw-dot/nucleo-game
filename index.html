@@ -12,9 +12,13 @@
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   window.__supabaseCreateClient = createClient;
 </script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; padding: 0; background: #000; overscroll-behavior: none; height: 100%; }
+  html, body { margin: 0; padding: 0; background: #06090c; overscroll-behavior: none; height: 100%; font-family: 'Rajdhani', sans-serif; }
   #root { height: 100%; }
+  .font-display { font-family: 'Orbitron', sans-serif; }
 </style>
 </head>
 <body>
@@ -103,11 +107,13 @@ async function dbPushAndFetchOpponent(code, id, status) {
 // ---- CONFIG / DATI (motore di gioco invariato) ----
 const CONFIG = {
   colors: {
-    bgTop: '#3a1220',
-    bgBottom: '#0d2b3a',
-    divider: 'rgba(255,255,255,0.15)',
-    path: 'rgba(255,255,255,0.14)',
-    projectile: '#ffe66d',
+    bgTop: '#2a0f1c',
+    bgBottom: '#081b28',
+    divider: 'rgba(255,255,255,0.18)',
+    grid: 'rgba(255,255,255,0.035)',
+    path: '#152233',
+    pathEdge: 'rgba(77,227,255,0.20)',
+    projectile: '#ffd23f',
   },
   baseHP: 100,
   pathAFrac: [
@@ -129,14 +135,14 @@ const CONFIG = {
 
 const TOWER_TYPES = {
   rapida: { name: 'Rapida', cost: 20, range: 90, damage: 6, cooldown: 420, radius: 11, projectileSpeed: 320, color: '#4de3ff', rangeColor: 'rgba(77,227,255,0.10)' },
-  pesante: { name: 'Pesante', cost: 38, range: 105, damage: 20, cooldown: 1100, radius: 14, projectileSpeed: 260, color: '#a78bfa', rangeColor: 'rgba(167,139,250,0.10)' },
+  pesante: { name: 'Pesante', cost: 38, range: 105, damage: 20, cooldown: 1100, radius: 14, projectileSpeed: 260, color: '#9b6dff', rangeColor: 'rgba(155,109,255,0.10)' },
 };
 
 const ENEMY_TYPES = {
   grunt: { hp: 30, speed: 55, radius: 10, damageToBase: 10, color: '#ff5d5d', armor: 0 },
-  scout: { hp: 14, speed: 95, radius: 7, damageToBase: 6, color: '#ffb84d', armor: 0 },
-  corazzato: { hp: 55, speed: 40, radius: 12, damageToBase: 14, color: '#8b93a8', armor: 4 },
-  boss: { hp: 260, speed: 32, radius: 18, damageToBase: 30, color: '#ff2d55', armor: 2 },
+  scout: { hp: 14, speed: 95, radius: 7, damageToBase: 6, color: '#ff9d4d', armor: 0 },
+  corazzato: { hp: 55, speed: 40, radius: 12, damageToBase: 14, color: '#8b95a8', armor: 4 },
+  boss: { hp: 260, speed: 32, radius: 18, damageToBase: 30, color: '#ff2d6f', armor: 2 },
 };
 
 const WAVES = [
@@ -461,68 +467,157 @@ function NucleoMultiplayer() {
       syncWaveUI();
     }
 
+    function polygon(cx, cy, r, sides, rotation) {
+      ctx.beginPath();
+      for (let i = 0; i < sides; i++) {
+        const a = rotation + (i / sides) * Math.PI * 2;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    }
+
+    function spike(cx, cy, rOuter, rInner, points, rotation) {
+      ctx.beginPath();
+      for (let i = 0; i < points * 2; i++) {
+        const r = i % 2 === 0 ? rOuter : rInner;
+        const a = rotation + (i / (points * 2)) * Math.PI * 2;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    }
+
+    function pathDir(pathId, segIndex) {
+      const path = pathPxRef.current[pathId];
+      if (!path || segIndex >= path.length - 1) return 0;
+      const a = path[segIndex], b = path[segIndex + 1];
+      return Math.atan2(b.y - a.y, b.x - a.x);
+    }
+
     function draw(now) {
       const { w, h } = dims;
       const paths = pathPxRef.current;
       ctx.clearRect(0, 0, w, h);
+
       ctx.fillStyle = CONFIG.colors.bgTop; ctx.fillRect(0, 0, w, h / 2);
       ctx.fillStyle = CONFIG.colors.bgBottom; ctx.fillRect(0, h / 2, w, h / 2);
+
+      ctx.strokeStyle = CONFIG.colors.grid; ctx.lineWidth = 1;
+      const gridStep = 28;
+      for (let gx = 0; gx < w; gx += gridStep) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke(); }
+      for (let gy = 0; gy < h; gy += gridStep) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke(); }
+
       ctx.strokeStyle = CONFIG.colors.divider; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
 
       ['A', 'B'].forEach((pid) => {
         const path = paths[pid];
-        if (path && path.length > 1) {
-          ctx.strokeStyle = CONFIG.colors.path; ctx.lineWidth = 16; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-          ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
-          for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
-          ctx.stroke();
-        }
+        if (!path || path.length < 2) return;
+        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.strokeStyle = CONFIG.colors.path; ctx.lineWidth = 20;
+        ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+        ctx.stroke();
+        ctx.strokeStyle = CONFIG.colors.pathEdge; ctx.lineWidth = 20; ctx.setLineDash([2, 16]);
+        ctx.lineDashOffset = -now / 40;
+        ctx.stroke();
+        ctx.setLineDash([]);
       });
 
       const coreX = w / 2, coreY = h / 2;
       const meterPct = surgeMeterRef.current / CONFIG.surge.maxMeter;
       const ready = meterPct >= 1;
       const surgeOn = now < surgeActiveUntilRef.current;
-      const baseRadius = 14 + meterPct * 10;
-      const pulse = ready ? Math.sin(now / 200) * 3 : 0;
+      const baseRadius = 13 + meterPct * 9;
+      const pulse = ready ? Math.sin(now / 180) * 3 : Math.sin(now / 900) * 1.2;
       const radius = baseRadius + pulse;
-      const coreColor = surgeOn || ready ? '#ffe66d' : '#4de3ff';
+      const coreColor = surgeOn || ready ? '#ffd23f' : '#4de3ff';
+
+      const rot1 = now / 4000, rot2 = -now / 2600;
+      ctx.lineCap = 'butt';
+      for (let i = 0; i < 6; i++) {
+        const a0 = rot1 + (i / 6) * Math.PI * 2;
+        ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(coreX, coreY, 30, a0, a0 + 0.35); ctx.stroke();
+      }
+      for (let i = 0; i < 4; i++) {
+        const a0 = rot2 + (i / 4) * Math.PI * 2;
+        ctx.strokeStyle = surgeOn ? 'rgba(255,210,63,0.5)' : 'rgba(77,227,255,0.35)'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(coreX, coreY, 26, a0, a0 + 0.55); ctx.stroke();
+      }
 
       ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(coreX, coreY, 22, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(coreX, coreY, 20, 0, Math.PI * 2); ctx.stroke();
       ctx.strokeStyle = coreColor; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(coreX, coreY, 22, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * meterPct); ctx.stroke();
+      ctx.beginPath(); ctx.arc(coreX, coreY, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * meterPct); ctx.stroke();
 
-      const coreGrad = ctx.createRadialGradient(coreX, coreY, 0, coreX, coreY, radius * 2.4);
-      coreGrad.addColorStop(0, surgeOn ? 'rgba(255,230,109,0.5)' : ready ? 'rgba(255,230,109,0.35)' : 'rgba(77,227,255,0.28)');
+      const coreGrad = ctx.createRadialGradient(coreX, coreY, 0, coreX, coreY, radius * 2.6);
+      coreGrad.addColorStop(0, surgeOn ? 'rgba(255,210,63,0.55)' : ready ? 'rgba(255,210,63,0.38)' : 'rgba(77,227,255,0.30)');
       coreGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = coreGrad; ctx.beginPath(); ctx.arc(coreX, coreY, radius * 2.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = coreGrad; ctx.beginPath(); ctx.arc(coreX, coreY, radius * 2.6, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = coreColor; ctx.beginPath(); ctx.arc(coreX, coreY, radius, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.beginPath(); ctx.arc(coreX, coreY, radius * 0.4, 0, Math.PI * 2); ctx.fill();
 
       towersRef.current.forEach((t) => {
         const typeConf = TOWER_TYPES[t.type];
         ctx.fillStyle = typeConf.rangeColor; ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.range, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = typeConf.color; ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.radius, 0, Math.PI * 2); ctx.fill();
+
+        if (t.type === 'rapida') {
+          ctx.save();
+          ctx.translate(t.x, t.y); ctx.rotate(now / 900);
+          polygon(0, 0, typeConf.radius, 4, 0);
+          ctx.restore();
+        } else {
+          polygon(t.x, t.y, typeConf.radius, 6, Math.PI / 6);
+        }
+        ctx.fillStyle = typeConf.color; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = 'rgba(6,9,12,0.85)';
+        ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.radius * 0.4, 0, Math.PI * 2); ctx.fill();
       });
 
       enemiesRef.current.forEach((e) => {
         const typeConf = ENEMY_TYPES[e.type];
         const p = pointAt(e.path, e.segIndex, e.segT);
-        ctx.fillStyle = typeConf.color; ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = typeConf.color;
+
+        if (e.type === 'scout') {
+          const dir = pathDir(e.path, e.segIndex);
+          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(dir);
+          ctx.beginPath();
+          ctx.moveTo(typeConf.radius + 3, 0);
+          ctx.lineTo(-typeConf.radius, typeConf.radius * 0.8);
+          ctx.lineTo(-typeConf.radius, -typeConf.radius * 0.8);
+          ctx.closePath(); ctx.fill();
+          ctx.restore();
+        } else if (e.type === 'corazzato') {
+          polygon(p.x, p.y, typeConf.radius, 6, Math.PI / 6); ctx.fill();
+        } else if (e.type === 'boss') {
+          spike(p.x, p.y, typeConf.radius, typeConf.radius * 0.62, 8, now / 2500);
+          ctx.fill();
+        } else {
+          ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius, 0, Math.PI * 2); ctx.fill();
+        }
+
         if (typeConf.armor) {
           ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius + 3, 0, Math.PI * 2); ctx.stroke();
+          ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius + 4, 0, Math.PI * 2); ctx.stroke();
         }
         const barW = e.type === 'boss' ? 40 : 24;
         const pct = Math.max(0, e.hp / typeConf.hp);
-        ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 9, barW, 4);
-        ctx.fillStyle = '#ff8a8a'; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 9, barW * pct, 4);
+        ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 10, barW, 4);
+        ctx.fillStyle = typeConf.color; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 10, barW * pct, 4);
       });
 
-      ctx.fillStyle = CONFIG.colors.projectile;
-      projectilesRef.current.forEach((p) => { ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2); ctx.fill(); });
+      projectilesRef.current.forEach((p) => {
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 7);
+        g.addColorStop(0, CONFIG.colors.projectile); g.addColorStop(1, 'rgba(255,210,63,0)');
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = CONFIG.colors.projectile; ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+      });
     }
+
 
     function loop(now) {
       const dt = Math.min(0.05, (now - last) / 1000);
@@ -596,21 +691,32 @@ function NucleoMultiplayer() {
     setResetTick((t) => t + 1);
   }
 
+  const lobbyBg = {
+    background: 'radial-gradient(circle at 50% 40%, #10202c 0%, #06090c 70%)',
+  };
+
   if (screen === 'lobby') {
     return (
-      <div className="w-full h-screen bg-black flex flex-col items-center justify-center gap-4 px-6 text-white">
-        <div className="text-cyan-300 text-xl font-semibold tracking-widest">NUCLEO</div>
-        <div className="text-white/40 text-xs">1v1 · difendi il tuo nucleo</div>
-        <button onClick={handleCreateRoom} disabled={lobbyBusy} className="w-full max-w-xs py-3 rounded-lg bg-cyan-400 text-black font-medium disabled:opacity-50">
+      <div style={lobbyBg} className="w-full h-screen flex flex-col items-center justify-center gap-5 px-6 text-white">
+        <div className="font-display text-3xl tracking-[0.25em] text-cyan-300" style={{ textShadow: '0 0 24px rgba(77,227,255,0.5)' }}>
+          NUCLEO
+        </div>
+        <div className="text-white/40 text-sm tracking-wide">1v1 · difendi il tuo nucleo</div>
+        <button
+          onClick={handleCreateRoom}
+          disabled={lobbyBusy}
+          className="w-full max-w-xs py-3 rounded-lg bg-cyan-400 text-black font-semibold tracking-wide disabled:opacity-50 active:scale-[0.98] transition-transform"
+          style={{ boxShadow: '0 0 20px rgba(77,227,255,0.35)' }}
+        >
           Crea partita
         </button>
-        <div className="w-full max-w-xs flex items-center gap-2">
-          <div className="flex-1 h-px bg-white/10" /><span className="text-white/30 text-xs">oppure</span><div className="flex-1 h-px bg-white/10" />
+        <div className="w-full max-w-xs flex items-center gap-3">
+          <div className="flex-1 h-px bg-white/10" /><span className="text-white/30 text-xs tracking-widest">OPPURE</span><div className="flex-1 h-px bg-white/10" />
         </div>
         <div className="w-full max-w-xs flex gap-2">
           <input value={joinInput} onChange={(ev) => setJoinInput(ev.target.value.toUpperCase())} placeholder="CODICE" maxLength={4}
-            className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-center tracking-widest text-white placeholder-white/30" />
-          <button onClick={handleJoinRoom} disabled={lobbyBusy} className="px-4 py-2 rounded-lg bg-white/10 text-white text-sm font-medium disabled:opacity-50">Entra</button>
+            className="flex-1 px-3 py-2.5 rounded-lg bg-white/5 border border-white/15 text-center tracking-[0.3em] font-display text-lg text-white placeholder-white/25 placeholder:tracking-widest placeholder:text-sm focus:outline-none focus:border-cyan-400/60" />
+          <button onClick={handleJoinRoom} disabled={lobbyBusy} className="px-5 py-2.5 rounded-lg bg-white/10 text-white font-semibold tracking-wide disabled:opacity-50 active:scale-[0.98] transition-transform">Entra</button>
         </div>
         {lobbyError && <div className="text-red-300 text-xs text-center max-w-xs">{lobbyError}</div>}
       </div>
@@ -619,11 +725,13 @@ function NucleoMultiplayer() {
 
   if (screen === 'waiting') {
     return (
-      <div className="w-full h-screen bg-black flex flex-col items-center justify-center gap-4 px-6 text-white">
-        <div className="text-cyan-300 text-sm">In attesa dell'avversario…</div>
-        <div className="text-5xl font-bold tracking-[0.3em] text-yellow-300">{roomCode}</div>
-        <div className="text-white/40 text-xs text-center max-w-xs">Condividi questo codice con chi vuoi sfidare.</div>
-        <button onClick={handleCancelWaiting} className="mt-2 text-white/40 text-xs underline">Annulla</button>
+      <div style={lobbyBg} className="w-full h-screen flex flex-col items-center justify-center gap-4 px-6 text-white">
+        <div className="text-cyan-300/70 text-sm tracking-widest">IN ATTESA DELL'AVVERSARIO…</div>
+        <div className="font-display text-6xl tracking-[0.3em] text-yellow-300" style={{ textShadow: '0 0 30px rgba(255,210,63,0.45)' }}>
+          {roomCode}
+        </div>
+        <div className="text-white/40 text-sm text-center max-w-xs">Condividi questo codice con chi vuoi sfidare.</div>
+        <button onClick={handleCancelWaiting} className="mt-2 text-white/40 text-xs underline tracking-wide">Annulla</button>
       </div>
     );
   }
@@ -635,14 +743,14 @@ function NucleoMultiplayer() {
   const waitingForOpponent = matchState !== 'playing' && !finalResult;
 
   return (
-    <div className="w-full h-screen bg-black flex flex-col select-none">
+    <div className="w-full h-screen flex flex-col select-none" style={{ background: '#06090c' }}>
       <div className="px-3 pt-3 pb-1">
-        <div className="flex justify-between text-xs text-red-300 mb-1">
+        <div className="flex justify-between items-baseline text-xs text-red-300/80 mb-1 tracking-wide">
           <span>AVVERSARIO {opponent ? `· onda ${opponent.wave}` : '· sincronizzazione…'}</span>
-          <span>{opponentHP} / {CONFIG.baseHP}</span>
+          <span className="font-display text-sm text-red-300">{opponentHP} / {CONFIG.baseHP}</span>
         </div>
         <div className="h-2 bg-red-950 rounded-full overflow-hidden">
-          <div className="h-full bg-red-400 rounded-full" style={{ width: `${opponentHP}%` }} />
+          <div className="h-full bg-red-400 rounded-full transition-[width]" style={{ width: `${opponentHP}%`, boxShadow: '0 0 8px rgba(255,93,93,0.6)' }} />
         </div>
       </div>
 
@@ -651,13 +759,13 @@ function NucleoMultiplayer() {
         <div className="absolute inset-x-0 top-2 text-center pointer-events-none">
           <div className="text-white/40 text-xs tracking-widest uppercase">{waveLabel}</div>
           {surgeMeter >= CONFIG.surge.maxMeter && matchState === 'playing' && (
-            <div className="text-yellow-300 text-xs font-medium mt-0.5 animate-pulse">⚡ SURGE PRONTO · TOCCA IL NUCLEO</div>
+            <div className="text-yellow-300 text-xs font-semibold mt-0.5 animate-pulse tracking-wide">⚡ SURGE PRONTO · TOCCA IL NUCLEO</div>
           )}
         </div>
 
         {waitingForOpponent && (
-          <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 px-6 text-center">
-            <div className={matchState === 'won' ? 'text-cyan-300 text-sm tracking-wide' : 'text-red-300 text-sm tracking-wide'}>
+          <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-2 px-6 text-center">
+            <div className={'font-display text-base tracking-wide ' + (matchState === 'won' ? 'text-cyan-300' : 'text-red-300')}>
               {matchState === 'won' ? 'DIFESA COMPLETATA' : 'BASE COMPROMESSA'}
             </div>
             <div className="text-white/50 text-xs">
@@ -667,30 +775,37 @@ function NucleoMultiplayer() {
         )}
 
         {finalResult && (
-          <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-3 px-6 text-center">
-            <div className={finalResult === 'win' ? 'text-cyan-300 text-lg font-semibold tracking-wide' : finalResult === 'lose' ? 'text-red-300 text-lg font-semibold tracking-wide' : 'text-yellow-300 text-lg font-semibold tracking-wide'}>
+          <div className="absolute inset-0 bg-black/85 flex flex-col items-center justify-center gap-3 px-6 text-center">
+            <div
+              className={
+                'font-display text-xl tracking-wide ' +
+                (finalResult === 'win' ? 'text-cyan-300' : finalResult === 'lose' ? 'text-red-300' : 'text-yellow-300')
+              }
+              style={{ textShadow: finalResult === 'win' ? '0 0 24px rgba(77,227,255,0.5)' : finalResult === 'lose' ? '0 0 24px rgba(255,93,93,0.4)' : '0 0 24px rgba(255,210,63,0.4)' }}
+            >
               {finalResult === 'win' ? 'HAI VINTO LA PARTITA' : finalResult === 'lose' ? 'HAI PERSO LA PARTITA' : 'PAREGGIO'}
             </div>
-            <button onClick={handleNewMatch} className="px-4 py-2 rounded-full bg-cyan-400 text-black text-sm font-medium">Nuova partita</button>
+            <button onClick={handleNewMatch} className="px-5 py-2 rounded-full bg-cyan-400 text-black text-sm font-semibold tracking-wide active:scale-[0.98] transition-transform">Nuova partita</button>
           </div>
         )}
       </div>
 
-      <div className="px-3 pb-3 pt-1">
+      <div className="px-3 pb-3 pt-2">
         <div className="h-2 bg-cyan-950 rounded-full overflow-hidden mb-1">
-          <div className="h-full bg-cyan-400 rounded-full" style={{ width: `${Math.max(0, baseHP)}%` }} />
+          <div className="h-full bg-cyan-400 rounded-full transition-[width]" style={{ width: `${Math.max(0, baseHP)}%`, boxShadow: '0 0 8px rgba(77,227,255,0.6)' }} />
         </div>
-        <div className="flex justify-between text-xs text-cyan-300 mb-2">
-          <span>{Math.max(0, baseHP)} / {CONFIG.baseHP}</span>
+        <div className="flex justify-between items-baseline text-xs text-cyan-300/80 mb-2 tracking-wide">
+          <span className="font-display text-sm text-cyan-300">{Math.max(0, baseHP)} / {CONFIG.baseHP}</span>
           <span>⚡ {energy} · sconfitti {defeated}</span>
         </div>
-        <div className="h-1.5 bg-yellow-950 rounded-full overflow-hidden mb-2">
-          <div className="h-full bg-yellow-300 rounded-full" style={{ width: `${surgeMeter}%` }} />
+        <div className="h-1.5 bg-yellow-950 rounded-full overflow-hidden mb-2.5">
+          <div className="h-full bg-yellow-300 rounded-full transition-[width]" style={{ width: `${surgeMeter}%`, boxShadow: surgeMeter > 0 ? '0 0 8px rgba(255,210,63,0.6)' : 'none' }} />
         </div>
         <div className="flex gap-2">
           {Object.entries(TOWER_TYPES).map(([key, t]) => (
             <button key={key} onClick={() => setSelectedType(key)}
-              className={'flex-1 py-2 rounded-lg text-xs font-medium border transition-colors ' + (selectedType === key ? 'bg-cyan-400 text-black border-cyan-400' : 'bg-white/5 text-white/70 border-white/10')}>
+              className={'flex-1 py-2.5 rounded-lg text-xs font-semibold tracking-wide border transition-all active:scale-[0.98] ' + (selectedType === key ? 'bg-cyan-400 text-black border-cyan-400' : 'bg-white/5 text-white/70 border-white/10')}
+              style={selectedType === key ? { boxShadow: '0 0 14px rgba(77,227,255,0.4)' } : undefined}>
               {t.name} · ⚡{t.cost}
             </button>
           ))}
