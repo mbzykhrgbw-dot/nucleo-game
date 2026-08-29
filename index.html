@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.x/dist/pixi.min.js"></script>
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   window.__supabaseCreateClient = createClient;
@@ -133,16 +134,78 @@ const CONFIG = {
   surge: { maxMeter: 100, meterPerDamage: 0.6, boostDuration: 6000, damageMultiplier: 1.6, cooldownMultiplier: 0.6, coreTapRadius: 36 },
 };
 
+// ---- GAME STATE (dati) — tutto ciò che conta per la simulazione, mai per l'aspetto ----
 const TOWER_TYPES = {
-  rapida: { name: 'Rapida', cost: 20, range: 90, damage: 6, cooldown: 420, radius: 11, projectileSpeed: 320, color: '#4de3ff', rangeColor: 'rgba(77,227,255,0.10)' },
-  pesante: { name: 'Pesante', cost: 38, range: 105, damage: 20, cooldown: 1100, radius: 14, projectileSpeed: 260, color: '#9b6dff', rangeColor: 'rgba(155,109,255,0.10)' },
+  rapida: { name: 'Rapida', cost: 20, range: 90, damage: 6, cooldown: 420, projectileSpeed: 320 },
+  pesante: { name: 'Pesante', cost: 38, range: 105, damage: 20, cooldown: 1100, projectileSpeed: 260 },
 };
 
 const ENEMY_TYPES = {
-  grunt: { hp: 30, speed: 55, radius: 10, damageToBase: 10, color: '#ff5d5d', armor: 0 },
-  scout: { hp: 14, speed: 95, radius: 7, damageToBase: 6, color: '#ff9d4d', armor: 0 },
-  corazzato: { hp: 55, speed: 40, radius: 12, damageToBase: 14, color: '#8b95a8', armor: 4 },
-  boss: { hp: 260, speed: 32, radius: 18, damageToBase: 30, color: '#ff2d6f', armor: 2 },
+  grunt: { hp: 30, speed: 55, damageToBase: 10, armor: 0 },
+  scout: { hp: 14, speed: 95, damageToBase: 6, armor: 0 },
+  corazzato: { hp: 55, speed: 40, damageToBase: 14, armor: 4 },
+  boss: { hp: 260, speed: 32, damageToBase: 30, armor: 2 },
+};
+
+// ---- VISUAL CONFIG — solo aspetto, mai valori di gioco. Oggi forme geometriche;
+// in futuro qui entreranno i riferimenti alle texture/sprite reali, senza toccare
+// TOWER_TYPES/ENEMY_TYPES né la logica in step(). ----
+const VISUAL_CONFIG = {
+  towers: {
+    rapida: { shape: 'diamond', radius: 11, color: 0x4de3ff, rangeColor: 0x4de3ff, rangeAlpha: 0.10 },
+    pesante: { shape: 'hexagon', radius: 14, color: 0x9b6dff, rangeColor: 0x9b6dff, rangeAlpha: 0.10 },
+  },
+  enemies: {
+    grunt: { shape: 'circle', radius: 10, color: 0xff5d5d },
+    scout: { shape: 'triangle', radius: 7, color: 0xff9d4d },
+    corazzato: { shape: 'hexagon', radius: 12, color: 0x8b95a8 },
+    boss: { shape: 'spike', radius: 18, color: 0xff2d6f },
+  },
+  core: { chargingColor: 0x4de3ff, readyColor: 0xffd23f },
+  projectile: { color: 0xffd23f, radius: 3 },
+  path: { color: 0x152233, width: 20 },
+  background: { top: 0x2a0f1c, bottom: 0x081b28, grid: 0xffffff, gridAlpha: 0.035, divider: 0xffffff, dividerAlpha: 0.18 },
+};
+
+// ---- ASSET MANAGER — oggi non carica nulla (niente texture ancora), ma ha già
+// la forma che avrà quando sostituiremo le forme geometriche con sprite veri:
+// AssetManager.textures['rapida'] conterrà la texture invece di essere assente. ----
+const AssetManager = {
+  textures: {},
+  loaded: false,
+  async load() {
+    // Fase 0: nessun asset grafico da caricare. Il Renderer userà VISUAL_CONFIG
+    // per disegnare forme geometriche finché qui non compariranno texture reali.
+    this.loaded = true;
+  },
+};
+
+// ---- ANIMATION SYSTEM — utility di animazione riutilizzabili (oggi solo
+// rotazione e pulsazione, usate per il nucleo e la torre Rapida; in futuro
+// gestirà anche i cicli di sprite animati). ----
+const AnimationSystem = {
+  rotation(now, msPerTurn) {
+    return (now / msPerTurn) % (Math.PI * 2);
+  },
+  pulse(now, periodMs, amplitude) {
+    return Math.sin(now / periodMs) * amplitude;
+  },
+};
+
+// ---- PARTICLE / EFFECTS SYSTEM — scheletro pronto ma inattivo in Fase 0.
+// Le fasi successive (impatti, esplosioni, energia del Surge) aggiungeranno
+// qui l'emissione reale di particelle, senza toccare la logica di gioco. ----
+const EffectsSystem = {
+  container: null,
+  init(container) {
+    this.container = container;
+  },
+  spawnHit(x, y, color) {
+    // Fase 0: nessun effetto ancora — placeholder intenzionale.
+  },
+  spawnExplosion(x, y, color) {
+    // Fase 0: nessun effetto ancora — placeholder intenzionale.
+  },
 };
 
 const WAVES = [
@@ -316,16 +379,40 @@ function NucleoMultiplayer() {
 
   // ---- game loop ----
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || dims.w === 0 || dims.h === 0) return;
+    const canvasEl = canvasRef.current;
+    if (!canvasEl || dims.w === 0 || dims.h === 0) return;
 
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = dims.w * dpr;
-    canvas.height = dims.h * dpr;
-    canvas.style.width = dims.w + 'px';
-    canvas.style.height = dims.h + 'px';
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
+
+    // ---- RENDERER (PixiJS) ----
+    // Il canvas resta lo stesso elemento React di sempre (stesso onPointerDown,
+    // stessa logica di input): a PixiJS diciamo solo di disegnare dentro di esso.
+    const pixiApp = new PIXI.Application({
+      view: canvasEl,
+      width: dims.w,
+      height: dims.h,
+      resolution: dpr,
+      autoDensity: true,
+      backgroundAlpha: 0,
+      antialias: true,
+    });
+
+    const layers = {
+      bg: new PIXI.Container(),
+      path: new PIXI.Container(),
+      core: new PIXI.Container(),
+      towers: new PIXI.Container(),
+      enemies: new PIXI.Container(),
+      projectiles: new PIXI.Container(),
+      effects: new PIXI.Container(),
+    };
+    Object.values(layers).forEach((l) => pixiApp.stage.addChild(l));
+    EffectsSystem.init(layers.effects);
+
+    const towerGfx = new Map();
+    const enemyGfx = new Map();
+    const projectileGfx = new Map();
+    let coreGfx = null;
 
     let raf;
     let last = performance.now();
@@ -431,7 +518,7 @@ function NucleoMultiplayer() {
           if (target) {
             t.cooldownLeft = surgeOn ? typeConf.cooldown * CONFIG.surge.cooldownMultiplier : typeConf.cooldown;
             const dmg = surgeOn ? typeConf.damage * CONFIG.surge.damageMultiplier : typeConf.damage;
-            projectilesRef.current.push({ x: t.x, y: t.y, targetId: target.id, damage: dmg, speed: typeConf.projectileSpeed });
+            projectilesRef.current.push({ id: nextIdRef.current++, x: t.x, y: t.y, targetId: target.id, damage: dmg, speed: typeConf.projectileSpeed });
           }
         }
       });
@@ -467,27 +554,6 @@ function NucleoMultiplayer() {
       syncWaveUI();
     }
 
-    function polygon(cx, cy, r, sides, rotation) {
-      ctx.beginPath();
-      for (let i = 0; i < sides; i++) {
-        const a = rotation + (i / sides) * Math.PI * 2;
-        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-    }
-
-    function spike(cx, cy, rOuter, rInner, points, rotation) {
-      ctx.beginPath();
-      for (let i = 0; i < points * 2; i++) {
-        const r = i % 2 === 0 ? rOuter : rInner;
-        const a = rotation + (i / (points * 2)) * Math.PI * 2;
-        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-    }
-
     function pathDir(pathId, segIndex) {
       const path = pathPxRef.current[pathId];
       if (!path || segIndex >= path.length - 1) return 0;
@@ -495,140 +561,211 @@ function NucleoMultiplayer() {
       return Math.atan2(b.y - a.y, b.x - a.x);
     }
 
-    function draw(now) {
+    function drawShape(g, shape, r, fillColor, strokeColor, strokeWidth) {
+      g.clear();
+      if (strokeColor !== undefined) g.lineStyle(strokeWidth || 1.5, strokeColor, 0.35);
+      g.beginFill(fillColor);
+      if (shape === 'diamond') {
+        g.moveTo(r, 0); g.lineTo(0, r); g.lineTo(-r, 0); g.lineTo(0, -r); g.closePath();
+      } else if (shape === 'hexagon') {
+        for (let i = 0; i < 6; i++) {
+          const a = Math.PI / 6 + (i / 6) * Math.PI * 2;
+          const x = Math.cos(a) * r, y = Math.sin(a) * r;
+          if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+        }
+        g.closePath();
+      } else if (shape === 'triangle') {
+        g.moveTo(r + 3, 0); g.lineTo(-r, r * 0.8); g.lineTo(-r, -r * 0.8); g.closePath();
+      } else if (shape === 'spike') {
+        const points = 8, rInner = r * 0.62;
+        for (let i = 0; i < points * 2; i++) {
+          const rr = i % 2 === 0 ? r : rInner;
+          const a = (i / (points * 2)) * Math.PI * 2;
+          const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
+          if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+        }
+        g.closePath();
+      } else {
+        g.drawCircle(0, 0, r);
+      }
+      g.endFill();
+    }
+
+    function buildStaticScene() {
       const { w, h } = dims;
-      const paths = pathPxRef.current;
-      ctx.clearRect(0, 0, w, h);
-
-      ctx.fillStyle = CONFIG.colors.bgTop; ctx.fillRect(0, 0, w, h / 2);
-      ctx.fillStyle = CONFIG.colors.bgBottom; ctx.fillRect(0, h / 2, w, h / 2);
-
-      ctx.strokeStyle = CONFIG.colors.grid; ctx.lineWidth = 1;
+      const bg = new PIXI.Graphics();
+      bg.beginFill(VISUAL_CONFIG.background.top); bg.drawRect(0, 0, w, h / 2); bg.endFill();
+      bg.beginFill(VISUAL_CONFIG.background.bottom); bg.drawRect(0, h / 2, w, h / 2); bg.endFill();
+      bg.lineStyle(1, VISUAL_CONFIG.background.grid, VISUAL_CONFIG.background.gridAlpha);
       const gridStep = 28;
-      for (let gx = 0; gx < w; gx += gridStep) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, h); ctx.stroke(); }
-      for (let gy = 0; gy < h; gy += gridStep) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(w, gy); ctx.stroke(); }
+      for (let gx = 0; gx < w; gx += gridStep) { bg.moveTo(gx, 0); bg.lineTo(gx, h); }
+      for (let gy = 0; gy < h; gy += gridStep) { bg.moveTo(0, gy); bg.lineTo(w, gy); }
+      bg.lineStyle(2, VISUAL_CONFIG.background.divider, VISUAL_CONFIG.background.dividerAlpha);
+      bg.moveTo(0, h / 2); bg.lineTo(w, h / 2);
+      layers.bg.addChild(bg);
 
-      ctx.strokeStyle = CONFIG.colors.divider; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
-
+      const pathG = new PIXI.Graphics();
       ['A', 'B'].forEach((pid) => {
-        const path = paths[pid];
+        const path = pathPxRef.current[pid];
         if (!path || path.length < 2) return;
-        ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-        ctx.strokeStyle = CONFIG.colors.path; ctx.lineWidth = 20;
-        ctx.beginPath(); ctx.moveTo(path[0].x, path[0].y);
-        for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
-        ctx.stroke();
-        ctx.strokeStyle = CONFIG.colors.pathEdge; ctx.lineWidth = 20; ctx.setLineDash([2, 16]);
-        ctx.lineDashOffset = -now / 40;
-        ctx.stroke();
-        ctx.setLineDash([]);
+        pathG.lineStyle({ width: VISUAL_CONFIG.path.width, color: VISUAL_CONFIG.path.color, cap: PIXI.LINE_CAP.ROUND, join: PIXI.LINE_JOIN.ROUND });
+        pathG.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < path.length; i++) pathG.lineTo(path[i].x, path[i].y);
       });
+      layers.path.addChild(pathG);
 
-      const coreX = w / 2, coreY = h / 2;
+      coreGfx = new PIXI.Graphics();
+      coreGfx.position.set(w / 2, h / 2);
+      layers.core.addChild(coreGfx);
+    }
+    buildStaticScene();
+
+    function renderCore(now) {
       const meterPct = surgeMeterRef.current / CONFIG.surge.maxMeter;
       const ready = meterPct >= 1;
       const surgeOn = now < surgeActiveUntilRef.current;
       const baseRadius = 13 + meterPct * 9;
-      const pulse = ready ? Math.sin(now / 180) * 3 : Math.sin(now / 900) * 1.2;
+      const pulse = ready ? AnimationSystem.pulse(now, 180, 3) : AnimationSystem.pulse(now, 900, 1.2);
       const radius = baseRadius + pulse;
-      const coreColor = surgeOn || ready ? '#ffd23f' : '#4de3ff';
+      const color = surgeOn || ready ? VISUAL_CONFIG.core.readyColor : VISUAL_CONFIG.core.chargingColor;
 
-      const rot1 = now / 4000, rot2 = -now / 2600;
-      ctx.lineCap = 'butt';
+      coreGfx.clear();
+      const rot1 = AnimationSystem.rotation(now, 4000);
+      const rot2 = -AnimationSystem.rotation(now, 2600);
       for (let i = 0; i < 6; i++) {
         const a0 = rot1 + (i / 6) * Math.PI * 2;
-        ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(coreX, coreY, 30, a0, a0 + 0.35); ctx.stroke();
+        coreGfx.lineStyle(2, 0xffffff, 0.16);
+        coreGfx.arc(0, 0, 30, a0, a0 + 0.35);
       }
       for (let i = 0; i < 4; i++) {
         const a0 = rot2 + (i / 4) * Math.PI * 2;
-        ctx.strokeStyle = surgeOn ? 'rgba(255,210,63,0.5)' : 'rgba(77,227,255,0.35)'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(coreX, coreY, 26, a0, a0 + 0.55); ctx.stroke();
+        coreGfx.lineStyle(2, surgeOn ? 0xffd23f : 0x4de3ff, surgeOn ? 0.5 : 0.35);
+        coreGfx.arc(0, 0, 26, a0, a0 + 0.55);
       }
+      coreGfx.lineStyle(3, 0xffffff, 0.15);
+      coreGfx.drawCircle(0, 0, 20);
+      coreGfx.lineStyle(3, color, 1);
+      coreGfx.arc(0, 0, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * meterPct);
 
-      ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(coreX, coreY, 20, 0, Math.PI * 2); ctx.stroke();
-      ctx.strokeStyle = coreColor; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.arc(coreX, coreY, 20, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * meterPct); ctx.stroke();
+      coreGfx.beginFill(color, 0.3); coreGfx.drawCircle(0, 0, radius * 2.6); coreGfx.endFill();
+      coreGfx.beginFill(color, 1); coreGfx.drawCircle(0, 0, radius); coreGfx.endFill();
+      coreGfx.beginFill(0xffffff, 0.55); coreGfx.drawCircle(0, 0, radius * 0.4); coreGfx.endFill();
+    }
 
-      const coreGrad = ctx.createRadialGradient(coreX, coreY, 0, coreX, coreY, radius * 2.6);
-      coreGrad.addColorStop(0, surgeOn ? 'rgba(255,210,63,0.55)' : ready ? 'rgba(255,210,63,0.38)' : 'rgba(77,227,255,0.30)');
-      coreGrad.addColorStop(1, 'rgba(0,0,0,0)');
-      ctx.fillStyle = coreGrad; ctx.beginPath(); ctx.arc(coreX, coreY, radius * 2.6, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = coreColor; ctx.beginPath(); ctx.arc(coreX, coreY, radius, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.beginPath(); ctx.arc(coreX, coreY, radius * 0.4, 0, Math.PI * 2); ctx.fill();
-
+    function syncTowers(now) {
       towersRef.current.forEach((t) => {
-        const typeConf = TOWER_TYPES[t.type];
-        ctx.fillStyle = typeConf.rangeColor; ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.range, 0, Math.PI * 2); ctx.fill();
-
-        if (t.type === 'rapida') {
-          ctx.save();
-          ctx.translate(t.x, t.y); ctx.rotate(now / 900);
-          polygon(0, 0, typeConf.radius, 4, 0);
-          ctx.restore();
-        } else {
-          polygon(t.x, t.y, typeConf.radius, 6, Math.PI / 6);
+        let g = towerGfx.get(t.id);
+        const vc = VISUAL_CONFIG.towers[t.type];
+        if (!g) {
+          g = new PIXI.Container();
+          const range = new PIXI.Graphics();
+          range.beginFill(vc.rangeColor, vc.rangeAlpha);
+          range.drawCircle(0, 0, TOWER_TYPES[t.type].range);
+          range.endFill();
+          const body = new PIXI.Graphics();
+          drawShape(body, vc.shape, vc.radius, vc.color, 0xffffff, 1.5);
+          g.addChild(range);
+          g.addChild(body);
+          g.position.set(t.x, t.y);
+          g.__body = body;
+          towerGfx.set(t.id, g);
+          layers.towers.addChild(g);
         }
-        ctx.fillStyle = typeConf.color; ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
-        ctx.fillStyle = 'rgba(6,9,12,0.85)';
-        ctx.beginPath(); ctx.arc(t.x, t.y, typeConf.radius * 0.4, 0, Math.PI * 2); ctx.fill();
-      });
-
-      enemiesRef.current.forEach((e) => {
-        const typeConf = ENEMY_TYPES[e.type];
-        const p = pointAt(e.path, e.segIndex, e.segT);
-        ctx.fillStyle = typeConf.color;
-
-        if (e.type === 'scout') {
-          const dir = pathDir(e.path, e.segIndex);
-          ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(dir);
-          ctx.beginPath();
-          ctx.moveTo(typeConf.radius + 3, 0);
-          ctx.lineTo(-typeConf.radius, typeConf.radius * 0.8);
-          ctx.lineTo(-typeConf.radius, -typeConf.radius * 0.8);
-          ctx.closePath(); ctx.fill();
-          ctx.restore();
-        } else if (e.type === 'corazzato') {
-          polygon(p.x, p.y, typeConf.radius, 6, Math.PI / 6); ctx.fill();
-        } else if (e.type === 'boss') {
-          spike(p.x, p.y, typeConf.radius, typeConf.radius * 0.62, 8, now / 2500);
-          ctx.fill();
-        } else {
-          ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius, 0, Math.PI * 2); ctx.fill();
-        }
-
-        if (typeConf.armor) {
-          ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.arc(p.x, p.y, typeConf.radius + 4, 0, Math.PI * 2); ctx.stroke();
-        }
-        const barW = e.type === 'boss' ? 40 : 24;
-        const pct = Math.max(0, e.hp / typeConf.hp);
-        ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 10, barW, 4);
-        ctx.fillStyle = typeConf.color; ctx.fillRect(p.x - barW / 2, p.y - typeConf.radius - 10, barW * pct, 4);
-      });
-
-      projectilesRef.current.forEach((p) => {
-        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 7);
-        g.addColorStop(0, CONFIG.colors.projectile); g.addColorStop(1, 'rgba(255,210,63,0)');
-        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = CONFIG.colors.projectile; ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill();
+        if (t.type === 'rapida') g.__body.rotation = AnimationSystem.rotation(now, 900);
       });
     }
 
+    function syncEnemies(now) {
+      const seen = new Set();
+      enemiesRef.current.forEach((e) => {
+        seen.add(e.id);
+        const typeConf = ENEMY_TYPES[e.type];
+        const vc = VISUAL_CONFIG.enemies[e.type];
+        const p = pointAt(e.path, e.segIndex, e.segT);
+        let entry = enemyGfx.get(e.id);
+        if (!entry) {
+          const container = new PIXI.Container();
+          const body = new PIXI.Graphics();
+          drawShape(body, vc.shape, vc.radius, vc.color);
+          container.addChild(body);
+          let ring = null;
+          if (typeConf.armor) {
+            ring = new PIXI.Graphics();
+            ring.lineStyle(2, 0xffffff, 0.55);
+            ring.drawCircle(0, 0, vc.radius + 4);
+            container.addChild(ring);
+          }
+          const barW = e.type === 'boss' ? 40 : 24;
+          const barBg = new PIXI.Graphics();
+          barBg.beginFill(0x000000, 0.45); barBg.drawRect(-barW / 2, -vc.radius - 10, barW, 4); barBg.endFill();
+          const barFill = new PIXI.Graphics();
+          container.addChild(barBg);
+          container.addChild(barFill);
+          layers.enemies.addChild(container);
+          entry = { container, body, barFill, barW, vc };
+          enemyGfx.set(e.id, entry);
+        }
+        entry.container.position.set(p.x, p.y);
+        if (e.type === 'scout') entry.container.rotation = pathDir(e.path, e.segIndex);
+        if (e.type === 'boss') entry.body.rotation = AnimationSystem.rotation(now, 2500);
+        const pct = Math.max(0, e.hp / typeConf.hp);
+        entry.barFill.clear();
+        entry.barFill.beginFill(entry.vc.color);
+        entry.barFill.drawRect(-entry.barW / 2, -entry.vc.radius - 10, entry.barW * pct, 4);
+        entry.barFill.endFill();
+      });
+      enemyGfx.forEach((entry, id) => {
+        if (!seen.has(id)) {
+          entry.container.destroy({ children: true });
+          enemyGfx.delete(id);
+        }
+      });
+    }
+
+    function syncProjectiles() {
+      const seen = new Set();
+      projectilesRef.current.forEach((p) => {
+        seen.add(p.id);
+        let g = projectileGfx.get(p.id);
+        if (!g) {
+          g = new PIXI.Graphics();
+          g.beginFill(VISUAL_CONFIG.projectile.color, 0.35);
+          g.drawCircle(0, 0, VISUAL_CONFIG.projectile.radius + 4);
+          g.endFill();
+          g.beginFill(VISUAL_CONFIG.projectile.color);
+          g.drawCircle(0, 0, VISUAL_CONFIG.projectile.radius);
+          g.endFill();
+          projectileGfx.set(p.id, g);
+          layers.projectiles.addChild(g);
+        }
+        g.position.set(p.x, p.y);
+      });
+      projectileGfx.forEach((g, id) => {
+        if (!seen.has(id)) { g.destroy(); projectileGfx.delete(id); }
+      });
+    }
+
+    function render(now) {
+      renderCore(now);
+      syncTowers(now);
+      syncEnemies(now);
+      syncProjectiles();
+    }
 
     function loop(now) {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       if (matchStateRef.current === 'playing') step(dt, now);
-      draw(now);
+      render(now);
       raf = requestAnimationFrame(loop);
     }
     raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      pixiApp.destroy(false, { children: true });
+    };
   }, [dims, resetTick, screen]);
+
 
   function activateSurge() {
     if (surgeMeter < CONFIG.surge.maxMeter) return;
@@ -648,7 +785,7 @@ function NucleoMultiplayer() {
     if (energy < typeConf.cost) return;
     const tooClose = towersRef.current.some((t) => Math.hypot(t.x - x, t.y - y) < CONFIG.build.minDist);
     if (tooClose) return;
-    towersRef.current.push({ x, y, type: selectedType, cooldownLeft: 0 });
+    towersRef.current.push({ id: nextIdRef.current++, x, y, type: selectedType, cooldownLeft: 0 });
     setEnergy((en) => en - typeConf.cost);
   }
 
