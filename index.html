@@ -37,6 +37,30 @@
         msg + '</div>';
     }
   }
+  // Pannello diagnostico temporaneo: registra ogni passo dell'avvio, così se
+  // qualcosa si blocca SENZA generare un errore (es. una promise che non si
+  // risolve mai) vediamo comunque fino a dove è arrivata l'inizializzazione.
+  window.__debugLines = [];
+  window.debugLog = function (msg) {
+    window.__debugLines.push(msg);
+    var panel = document.getElementById('debug-log-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'debug-log-panel';
+      panel.style.cssText = 'position:fixed;top:0;left:0;right:0;max-height:42vh;overflow:auto;' +
+        'background:rgba(0,0,0,0.88);color:#7fffa0;font-family:monospace;font-size:10px;' +
+        'padding:6px 28px 6px 6px;z-index:99999;white-space:pre-wrap;line-height:1.5;';
+      var closeBtn = document.createElement('div');
+      closeBtn.textContent = '×';
+      closeBtn.style.cssText = 'position:absolute;top:4px;right:8px;color:#fff;font-size:16px;cursor:pointer;';
+      closeBtn.onclick = function () { panel.style.display = 'none'; };
+      panel.appendChild(closeBtn);
+      document.body.appendChild(panel);
+    }
+    var line = document.createElement('div');
+    line.textContent = new Date().toLocaleTimeString() + ' — ' + msg;
+    panel.appendChild(line);
+  };
   window.addEventListener('error', function (e) {
     showFatalError(
       (e.message || 'errore sconosciuto') +
@@ -306,6 +330,27 @@ const FALLBACK_GENERATORS = {
   propGrass: () => generateGrassFallback(),
 };
 
+async function urlExists(url, timeoutMs) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+    const res = await fetch(url, { method: 'GET', signal: controller.signal, cache: 'no-store' });
+    clearTimeout(timer);
+    return res.ok;
+  } catch (err) {
+    return false;
+  }
+}
+
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise(function (_, reject) {
+      setTimeout(function () { reject(new Error('timeout: ' + label)); }, ms);
+    }),
+  ]);
+}
+
 const AssetManager = {
   textures: {},
   loaded: false,
@@ -313,15 +358,25 @@ const AssetManager = {
   async load() {
     if (this.loaded) return;
     for (const [key, url] of Object.entries(ASSET_MANIFEST)) {
-      try {
-        const tex = await PIXI.Assets.load(url);
-        if (!tex || !tex.valid) throw new Error('texture non valida');
-        this.textures[key] = tex;
-        this.usingFallback[key] = false;
-      } catch (err) {
-        this.textures[key] = FALLBACK_GENERATORS[key]();
-        this.usingFallback[key] = true;
+      let tex = null;
+      const exists = await urlExists(url, 3000);
+      if (exists) {
+        try {
+          const loaded = await withTimeout(PIXI.Assets.load(url), 4000, key);
+          if (loaded && loaded.valid !== false) tex = loaded;
+        } catch (err) {
+          window.debugLog && window.debugLog('Caricamento reale fallito per ' + key + ': ' + err.message);
+        }
       }
+      if (!tex) {
+        tex = FALLBACK_GENERATORS[key]();
+        this.usingFallback[key] = true;
+        window.debugLog && window.debugLog(key + ': uso fallback procedurale (file assente o non caricabile)');
+      } else {
+        this.usingFallback[key] = false;
+        window.debugLog && window.debugLog(key + ': caricato asset reale da ' + url);
+      }
+      this.textures[key] = tex;
     }
     this.loaded = true;
   },
@@ -543,6 +598,7 @@ function NucleoMultiplayer() {
       backgroundAlpha: 0,
       antialias: true,
     });
+    window.debugLog && window.debugLog('PixiJS: applicazione creata (versione ' + (PIXI.VERSION || '?') + ')');
 
     const layers = {
       bg: new PIXI.Container(),
@@ -1001,12 +1057,20 @@ function NucleoMultiplayer() {
     }
 
     let cancelled = false;
+    window.debugLog && window.debugLog('Avvio caricamento asset ambiente...');
     (async () => {
-      await AssetManager.load();
-      if (cancelled) return;
-      buildStaticScene();
-      last = performance.now();
-      raf = requestAnimationFrame(loop);
+      try {
+        await AssetManager.load();
+        if (cancelled) return;
+        window.debugLog && window.debugLog('Asset pronti. Costruzione scena...');
+        buildStaticScene();
+        window.debugLog && window.debugLog('Scena costruita. Avvio loop di gioco...');
+        last = performance.now();
+        raf = requestAnimationFrame(loop);
+        window.debugLog && window.debugLog('Loop avviato correttamente.');
+      } catch (err) {
+        showFatalError('Errore durante l\'avvio della scena: ' + (err && err.message ? err.message : String(err)));
+      }
     })();
 
     return () => {
