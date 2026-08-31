@@ -355,31 +355,36 @@ function withTimeout(promise, ms, label) {
 const AssetManager = {
   textures: {},
   loaded: false,
+  loadingPromise: null,
   usingFallback: {},
   async load() {
     if (this.loaded) return;
-    for (const [key, url] of Object.entries(ASSET_MANIFEST)) {
-      let tex = null;
-      const exists = await urlExists(url, 3000);
-      if (exists) {
-        try {
-          const loaded = await withTimeout(PIXI.Assets.load(url), 4000, key);
-          if (loaded && loaded.valid !== false) tex = loaded;
-        } catch (err) {
-          window.debugLog && window.debugLog('Caricamento reale fallito per ' + key + ': ' + err.message);
+    if (this.loadingPromise) { window.debugLog && window.debugLog('AssetManager: caricamento già in corso, attendo la stessa promise'); return this.loadingPromise; }
+    this.loadingPromise = (async () => {
+      for (const [key, url] of Object.entries(ASSET_MANIFEST)) {
+        let tex = null;
+        const exists = await urlExists(url, 3000);
+        if (exists) {
+          try {
+            const loaded = await withTimeout(PIXI.Assets.load(url), 4000, key);
+            if (loaded && loaded.valid !== false) tex = loaded;
+          } catch (err) {
+            window.debugLog && window.debugLog('Caricamento reale fallito per ' + key + ': ' + err.message);
+          }
         }
+        if (!tex) {
+          tex = FALLBACK_GENERATORS[key]();
+          this.usingFallback[key] = true;
+          window.debugLog && window.debugLog(key + ': uso fallback procedurale (file assente o non caricabile)');
+        } else {
+          this.usingFallback[key] = false;
+          window.debugLog && window.debugLog(key + ': caricato asset reale da ' + url);
+        }
+        this.textures[key] = tex;
       }
-      if (!tex) {
-        tex = FALLBACK_GENERATORS[key]();
-        this.usingFallback[key] = true;
-        window.debugLog && window.debugLog(key + ': uso fallback procedurale (file assente o non caricabile)');
-      } else {
-        this.usingFallback[key] = false;
-        window.debugLog && window.debugLog(key + ': caricato asset reale da ' + url);
-      }
-      this.textures[key] = tex;
-    }
-    this.loaded = true;
+      this.loaded = true;
+    })();
+    return this.loadingPromise;
   },
 };
 
@@ -584,6 +589,9 @@ function NucleoMultiplayer() {
   useEffect(() => {
     const canvasEl = canvasRef.current;
     if (!canvasEl || dims.w === 0 || dims.h === 0) return;
+
+    const instanceId = Math.random().toString(36).slice(2, 8);
+    window.debugLog && window.debugLog('EFFETTO AVVIATO [' + instanceId + '] dims=' + dims.w + 'x' + dims.h);
 
     const dpr = window.devicePixelRatio || 1;
 
@@ -1065,23 +1073,24 @@ function NucleoMultiplayer() {
     }
 
     let cancelled = false;
-    window.debugLog && window.debugLog('Avvio caricamento asset ambiente...');
+    window.debugLog && window.debugLog('[' + instanceId + '] Avvio caricamento asset ambiente...');
     (async () => {
       try {
         await AssetManager.load();
-        if (cancelled) return;
-        window.debugLog && window.debugLog('Asset pronti. Costruzione scena...');
+        if (cancelled) { window.debugLog && window.debugLog('[' + instanceId + '] annullato dopo il caricamento asset (istanza superata)'); return; }
+        window.debugLog && window.debugLog('[' + instanceId + '] Asset pronti. Costruzione scena...');
         buildStaticScene();
-        window.debugLog && window.debugLog('Scena costruita. Avvio loop di gioco...');
+        window.debugLog && window.debugLog('[' + instanceId + '] Scena costruita. Avvio loop di gioco...');
         last = performance.now();
         raf = requestAnimationFrame(loop);
-        window.debugLog && window.debugLog('Loop avviato correttamente.');
+        window.debugLog && window.debugLog('[' + instanceId + '] Loop avviato correttamente.');
       } catch (err) {
-        showFatalError('Errore durante l\'avvio della scena: ' + (err && err.message ? err.message : String(err)));
+        showFatalError('Errore durante l\'avvio della scena [' + instanceId + ']: ' + (err && err.message ? err.message : String(err)));
       }
     })();
 
     return () => {
+      window.debugLog && window.debugLog('EFFETTO CLEANUP [' + instanceId + ']');
       cancelled = true;
       cancelAnimationFrame(raf);
       pixiApp.destroy(false, { children: true });
