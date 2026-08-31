@@ -462,6 +462,9 @@ function NucleoMultiplayer() {
   const surgeActiveRef = useRef(false);
   const baseHPRef = useRef(CONFIG.baseHP);
   const myIdRef = useRef(null);
+  const pixiAppRef = useRef(null);
+  const layersRef = useRef(null);
+  const dimsRef = useRef({ w: 360, h: 600 });
 
   const [dims, setDims] = useState({ w: 360, h: 600 });
   const [baseHP, setBaseHP] = useState(CONFIG.baseHP);
@@ -501,6 +504,7 @@ function NucleoMultiplayer() {
   }, [dims]);
 
   useEffect(() => { baseHPRef.current = baseHP; }, [baseHP]);
+  useEffect(() => { dimsRef.current = dims; }, [dims]);
 
   useEffect(() => {
     if (baseHP <= 0 && matchStateRef.current === 'playing') {
@@ -585,13 +589,21 @@ function NucleoMultiplayer() {
     setFinalResult(compareResults(mine, theirs));
   }, [matchState, opponent, finalResult]);
 
-  // ---- game loop ----
+  // ---- CREAZIONE RENDERER (una sola volta per partita/schermata) ----
+  // Dipende SOLO da resetTick/screen, non da dims: un cambio di dimensioni
+  // (es. misurazione iniziale del container, rotazione del telefono) non deve
+  // distruggere e ricreare l'intera applicazione Pixi a metà caricamento.
   useEffect(() => {
     const canvasEl = canvasRef.current;
-    if (!canvasEl || dims.w === 0 || dims.h === 0) return;
+    if (!canvasEl) return;
+    if (pixiAppRef.current) {
+      window.debugLog && window.debugLog('Creazione saltata: un\'applicazione Pixi esiste già.');
+      return;
+    }
 
     const instanceId = Math.random().toString(36).slice(2, 8);
-    window.debugLog && window.debugLog('EFFETTO AVVIATO [' + instanceId + '] dims=' + dims.w + 'x' + dims.h);
+    const initialDims = dimsRef.current.w > 0 ? dimsRef.current : { w: 360, h: 600 };
+    window.debugLog && window.debugLog('EFFETTO AVVIATO [' + instanceId + '] dims iniziali=' + initialDims.w + 'x' + initialDims.h);
 
     const dpr = window.devicePixelRatio || 1;
 
@@ -600,13 +612,14 @@ function NucleoMultiplayer() {
     // stessa logica di input): a PixiJS diciamo solo di disegnare dentro di esso.
     const pixiApp = new PIXI.Application({
       view: canvasEl,
-      width: dims.w,
-      height: dims.h,
+      width: initialDims.w,
+      height: initialDims.h,
       resolution: dpr,
       autoDensity: true,
       backgroundAlpha: 0,
       antialias: true,
     });
+    pixiAppRef.current = pixiApp;
     window.debugLog && window.debugLog('PixiJS: applicazione creata (versione ' + (PIXI.VERSION || '?') + ')');
 
     const layers = {
@@ -618,6 +631,7 @@ function NucleoMultiplayer() {
       projectiles: new PIXI.Container(),
       effects: new PIXI.Container(),
     };
+    layersRef.current = layers;
     Object.values(layers).forEach((l) => pixiApp.stage.addChild(l));
     EffectsSystem.init(layers.effects);
 
@@ -831,7 +845,7 @@ function NucleoMultiplayer() {
 
     function buildStaticScene() {
       window.debugLog && window.debugLog('buildStaticScene: avviata');
-      const { w, h } = dims;
+      const { w, h } = dimsRef.current;
 
       // terreno — texture vera (reale o procedurale) ripetuta su tutta l'arena,
       // non più un colore piatto
@@ -921,7 +935,7 @@ function NucleoMultiplayer() {
     }
 
     function updateAmbientParticles(dtSec) {
-      const { w, h } = dims;
+      const { w, h } = dimsRef.current;
       ambientParticles.forEach((p) => {
         p.y += p.__vy * dtSec;
         p.x += p.__vx * dtSec;
@@ -1077,10 +1091,27 @@ function NucleoMultiplayer() {
     (async () => {
       try {
         await AssetManager.load();
-        if (cancelled) { window.debugLog && window.debugLog('[' + instanceId + '] annullato dopo il caricamento asset (istanza superata)'); return; }
+        if (cancelled) { window.debugLog && window.debugLog('[' + instanceId + '] annullato (schermata chiusa prima del completamento)'); return; }
         window.debugLog && window.debugLog('[' + instanceId + '] Asset pronti. Costruzione scena...');
         buildStaticScene();
-        window.debugLog && window.debugLog('[' + instanceId + '] Scena costruita. Avvio loop di gioco...');
+
+        // Verifica esplicita: confermiamo che la scena sia davvero visibile
+        // prima di dichiarare l'avvio riuscito, invece di darlo per scontato.
+        const stageOk = pixiApp.stage.children.length > 0;
+        const bgOk = layers.bg.children.length > 0;
+        const rendererOk = pixiApp.renderer.width > 0 && pixiApp.renderer.height > 0;
+        const canvasVisible = canvasEl.width > 0 && canvasEl.height > 0 && canvasEl.offsetParent !== null;
+        window.debugLog && window.debugLog(
+          '[' + instanceId + '] Verifica scena: stage=' + stageOk + ' bg=' + bgOk +
+          ' renderer=' + rendererOk + ' (' + pixiApp.renderer.width + 'x' + pixiApp.renderer.height + ')' +
+          ' canvasVisibile=' + canvasVisible
+        );
+        if (!stageOk || !bgOk || !rendererOk || !canvasVisible) {
+          showFatalError('Scena costruita ma non risulta visibile — stage=' + stageOk + ' bg=' + bgOk + ' renderer=' + rendererOk + ' canvas=' + canvasVisible);
+          return;
+        }
+
+        window.debugLog && window.debugLog('[' + instanceId + '] Scena verificata. Avvio loop di gioco...');
         last = performance.now();
         raf = requestAnimationFrame(loop);
         window.debugLog && window.debugLog('[' + instanceId + '] Loop avviato correttamente.');
@@ -1094,8 +1125,21 @@ function NucleoMultiplayer() {
       cancelled = true;
       cancelAnimationFrame(raf);
       pixiApp.destroy(false, { children: true });
+      pixiAppRef.current = null;
+      layersRef.current = null;
     };
-  }, [dims, resetTick, screen]);
+  }, [resetTick, screen]);
+
+  // ---- RESIZE (separato dalla creazione) ----
+  // Quando cambiano le dimensioni (misurazione iniziale, rotazione del
+  // telefono), ridimensioniamo il renderer già esistente invece di
+  // distruggerlo e ricrearlo — l'app Pixi e il caricamento in corso non
+  // vengono mai interrotti da un cambio di dimensioni.
+  useEffect(() => {
+    if (!pixiAppRef.current || dims.w === 0 || dims.h === 0) return;
+    pixiAppRef.current.renderer.resize(dims.w, dims.h);
+    window.debugLog && window.debugLog('Resize renderer: ' + dims.w + 'x' + dims.h);
+  }, [dims]);
 
 
   function activateSurge() {
